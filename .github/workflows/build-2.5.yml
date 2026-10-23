@@ -1,0 +1,44 @@
+name: Build Codeware 2.5
+
+on:
+  push:
+    branches:
+      - pr-2.5-build
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup xmake
+        uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: latest
+
+      - name: Configure
+        run: xmake f -y -m release -a x64
+
+      - name: Build
+        run: xmake -y -v
+
+      - name: Collect artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          Get-ChildItem -Path build -Recurse -Include Codeware.dll,Codeware.pdb |
+            Copy-Item -Destination artifacts -Force
+          Get-ChildItem artifacts
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Codeware-2.5-compat
+          path: artifacts
+          if-no-files-found: error
