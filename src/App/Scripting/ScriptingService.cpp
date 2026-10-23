@@ -43,43 +43,121 @@ App::ScriptingService::ScriptingService(const std::filesystem::path& aStateDir)
 
 void App::ScriptingService::OnBootstrap()
 {
+    LogInfo("[ScriptingService] Attaching script hooks...");
+    LogInfo("[ScriptingService] Hook ScriptBundle::Destruct");
     HookAfter<Raw::ScriptBundle::Destruct>(&OnInitializeScripts).OrThrow();
+    LogInfo("[ScriptingService] Hook CGameFramework::InitializeGameInstance");
     HookAfter<Raw::CGameFramework::InitializeGameInstance>(&OnInitializeGameInstance).OrThrow();
+    LogInfo("[ScriptingService] Hook ScriptValidator::Validate");
     HookBefore<Raw::ScriptValidator::Validate>(&OnValidateScripts).OrThrow();
+    LogInfo("[ScriptingService] Hook ScriptValidator::ValidateProperty");
     Hook<Raw::ScriptValidator::ValidateProperty>(&OnValidateProperty).OrThrow();
+    LogInfo("[ScriptingService] Hook ScriptValidator::CompareTypeName");
     HookAfter<Raw::ScriptValidator::CompareTypeName>(&OnValidateTypeName).OrThrow();
+    LogInfo("[ScriptingService] Hook ScriptOpCodes::Register");
     HookAfter<Raw::ScriptOpCodes::Register>(&OnRegisterScriptOpCodes).OrThrow();
+    LogInfo("[ScriptingService] Hook CClass::CreateInstance");
     HookAfter<Raw::CClass::CreateInstance>(&OnCreateInstance).OrThrow();
+    LogInfo("[ScriptingService] Hook GetScriptGameInstance");
     Hook<Raw::GetScriptGameInstance>(&GetScriptGameInstance).OrThrow();
+    LogInfo("[ScriptingService] Script hooks attached");
 }
 
 void App::ScriptingService::OnInitializeScripts()
 {
-    if (Red::GetGlobalFunction("InitializeScripts;"))
+    LogInfo("[ScriptingService] OnInitializeScripts enter");
+
+    auto global = Red::GetGlobalFunction("InitializeScripts;");
+    if (!global)
     {
-        if (!Red::CGameEngine::Get()->scriptsLoaded)
-        {
-            ScriptableServiceContainer::Build(s_stateDir)->OnInitializeScripts();
-        }
-        else
-        {
-            ScriptableServiceContainer::Get()->OnInitializeScripts();
-        }
+        LogInfo("[ScriptingService] OnInitializeScripts skipped (no global)");
+        return;
     }
+
+    auto engine = Red::CGameEngine::Get();
+    if (!engine)
+    {
+        LogError("[ScriptingService] OnInitializeScripts skipped (no engine)");
+        return;
+    }
+
+    if (!engine->scriptsLoaded)
+    {
+        auto& container = ScriptableServiceContainer::Build(s_stateDir);
+        if (!container)
+        {
+            LogError("[ScriptingService] OnInitializeScripts skipped (container build failed)");
+            return;
+        }
+        container->OnInitializeScripts();
+    }
+    else
+    {
+        auto& container = ScriptableServiceContainer::Get();
+        if (!container)
+        {
+            LogError("[ScriptingService] OnInitializeScripts skipped (no container)");
+            return;
+        }
+        container->OnInitializeScripts();
+    }
+
+    LogInfo("[ScriptingService] OnInitializeScripts done");
 }
 
 void App::ScriptingService::OnInitializeGameInstance()
 {
-    ScriptableServiceContainer::Get()->OnInitializeGameInstance();
+    LogInfo("[ScriptingService] OnInitializeGameInstance enter");
+
+    auto& container = ScriptableServiceContainer::Get();
+    if (!container)
+    {
+        LogError("[ScriptingService] OnInitializeGameInstance skipped (no container)");
+        return;
+    }
+
+    container->OnInitializeGameInstance();
+    LogInfo("[ScriptingService] OnInitializeGameInstance done");
 }
 
 void App::ScriptingService::OnValidateScripts(void* aValidator, Red::ScriptBundle* aBundle, void* aReport)
 {
-    Red::GetClass<gameuiBaseUIDataTypeName>()->parent = Red::GetClass<ISerializableTypeName>();
-    Red::GetClass<scnChatterTypeName>()->parent = Red::GetClass<ISerializableTypeName>();
+    LogInfo("[ScriptingService] OnValidateScripts enter");
+
+    if (!aBundle)
+    {
+        LogError("[ScriptingService] OnValidateScripts skipped (no bundle)");
+        return;
+    }
+
+    if (auto serializableClass = Red::GetClass<ISerializableTypeName>())
+    {
+        if (auto baseUiClass = Red::GetClass<gameuiBaseUIDataTypeName>())
+        {
+            baseUiClass->parent = serializableClass;
+        }
+        if (auto chatterClass = Red::GetClass<scnChatterTypeName>())
+        {
+            chatterClass->parent = serializableClass;
+        }
+    }
+
+    uint32_t index = 0;
+    const auto count = aBundle->classes.Size();
 
     for (auto& classDef : aBundle->classes)
     {
+        if ((index % 500) == 0)
+        {
+            LogInfo("[ScriptingService] OnValidateScripts {}/{}", index, count);
+        }
+        ++index;
+
+        if (!classDef)
+        {
+            continue;
+        }
+
         if (classDef->flags.isNative)
         {
             if (classDef->name == ISerializableTypeName)
@@ -90,7 +168,13 @@ void App::ScriptingService::OnValidateScripts(void* aValidator, Red::ScriptBundl
             else if (classDef->name == audioEventElementTypeName || classDef->name == entLODDefinitionTypeName)
             {
                 classDef->flags.isStruct = true;
-                classDef->parent = reinterpret_cast<Red::ScriptClass*>(*aBundle->definitionsByName.Get(ISerializableTypeName));
+                if (auto serializableDef = aBundle->definitionsByName.Get(ISerializableTypeName))
+                {
+                    if (*serializableDef)
+                    {
+                        classDef->parent = reinterpret_cast<Red::ScriptClass*>(*serializableDef);
+                    }
+                }
             }
             else if (!classDef->flags.isStruct)
             {
@@ -129,17 +213,27 @@ void App::ScriptingService::OnValidateScripts(void* aValidator, Red::ScriptBundl
                             }
                         }
 
-                        classDef->parent = reinterpret_cast<Red::ScriptClass*>(*parentDef);
+                        if (parentDef && *parentDef)
+                        {
+                            classDef->parent = reinterpret_cast<Red::ScriptClass*>(*parentDef);
+                        }
                     }
                 }
             }
         }
     }
+
+    LogInfo("[ScriptingService] OnValidateScripts done");
 }
 
 bool App::ScriptingService::OnValidateProperty(void* aValidator, Red::ScriptProperty* aScriptProp,
                                                Red::CProperty* aNativeProp)
 {
+    if (!aScriptProp || !aNativeProp || !aScriptProp->type || !aNativeProp->type)
+    {
+        return false;
+    }
+
     auto* scriptType = aScriptProp->type;
     auto* nativeType = aNativeProp->type;
 
@@ -159,6 +253,11 @@ bool App::ScriptingService::OnValidateProperty(void* aValidator, Red::ScriptProp
 
 bool App::ScriptingService::OnValidateScriptType(Red::CBaseRTTIType* aNativeType, Red::ScriptType* aScriptType)
 {
+    if (!aNativeType || !aScriptType)
+    {
+        return false;
+    }
+
     if (aScriptType->metaType == Red::EScriptType::DynArray)
     {
         if (aNativeType->GetType() == Red::ERTTIType::Array)
@@ -213,13 +312,20 @@ void App::ScriptingService::OnValidateTypeName(bool& aValid, Red::CName aScriptT
 
 void App::ScriptingService::OnRegisterScriptOpCodes()
 {
+    LogInfo("[ScriptingService] OnRegisterScriptOpCodes enter");
     Raw::ScriptOpCodes::Handlers[Raw::ScriptOpCodes::New] = &ScriptOpCodeNew;
     Raw::ScriptOpCodes::Handlers[Raw::ScriptOpCodes::Cast] = &ScriptOpCodeCast;
+    LogInfo("[ScriptingService] OnRegisterScriptOpCodes done");
 }
 
 void App::ScriptingService::ScriptOpCodeNew(Red::IScriptable*, Red::CStackFrame* aFrame, void* aRet,
                                             Red::CBaseRTTIType*)
 {
+    if (!aFrame || !aFrame->code)
+    {
+        return;
+    }
+
     auto instanceType = *reinterpret_cast<Red::CClass**>(aFrame->code);
     aFrame->code += sizeof(Red::CClass*);
 
@@ -232,6 +338,11 @@ void App::ScriptingService::ScriptOpCodeNew(Red::IScriptable*, Red::CStackFrame*
 void App::ScriptingService::ScriptOpCodeCast(Red::IScriptable*, Red::CStackFrame* aFrame, void* aLhs,
                                              Red::CBaseRTTIType*)
 {
+    if (!aFrame || !aFrame->code)
+    {
+        return;
+    }
+
     auto lhsType = *reinterpret_cast<Red::CClass**>(aFrame->code);
     aFrame->code += sizeof(Red::CClass*);
 
@@ -273,7 +384,7 @@ void App::ScriptingService::ScriptOpCodeCast(Red::IScriptable*, Red::CStackFrame
 
 void App::ScriptingService::OnCreateInstance(Red::IScriptable*& aInstance, Red::CClass* aClass, uint64_t, bool)
 {
-    if (aInstance && aClass->flags.isScriptedClass)
+    if (aInstance && aClass && aClass->flags.isScriptedClass)
     {
         Red::CallVirtual(aInstance, aClass, "OnConstruct");
     }
@@ -282,6 +393,11 @@ void App::ScriptingService::OnCreateInstance(Red::IScriptable*& aInstance, Red::
 void App::ScriptingService::GetScriptGameInstance(Red::IScriptable*, Red::CStackFrame* aFrame,
                                                   Red::ScriptGameInstance* aRet, Red::CBaseRTTIType*)
 {
+    if (!aFrame || !aFrame->code)
+    {
+        return;
+    }
+
     ++aFrame->code;
 
     if (aRet)
